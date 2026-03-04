@@ -184,29 +184,33 @@ class DatabaseManager:
             db_path: Path to the analytics.db file.
         """
         self.db_path = db_path
-        self._conn: Optional[sqlite3.Connection] = None
 
-    @property
-    def conn(self) -> sqlite3.Connection:
-        """Lazy connection — opens on first use, reuses after."""
-        if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path)
-            self._conn.row_factory = sqlite3.Row
-        return self._conn
+    def _get_conn(self) -> sqlite3.Connection:
+        """Create a new connection (thread-safe).
+
+        We create a fresh connection per query batch to avoid SQLite's
+        'objects created in a thread' error in Streamlit's multi-threaded
+        environment. SQLite connections are cheap to create.
+        """
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
 
     def close(self) -> None:
-        """Close the database connection."""
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        """No-op — connections are created and closed per query."""
+        pass
 
     def _query_df(self, sql: str, params: list | tuple = ()) -> pd.DataFrame:
         """Execute a SQL query and return result as a DataFrame.
 
-        This is the core helper used by all query methods.
+        Creates a fresh connection each time to be thread-safe.
         Using pandas.read_sql_query() automatically maps column names.
         """
-        return pd.read_sql_query(sql, self.conn, params=params)
+        conn = self._get_conn()
+        try:
+            return pd.read_sql_query(sql, conn, params=params)
+        finally:
+            conn.close()
 
     # -------------------------------------------------------------------
     # 1. OVERVIEW STATS — single dict of KPI numbers
