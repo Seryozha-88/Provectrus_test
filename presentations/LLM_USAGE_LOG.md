@@ -33,18 +33,18 @@ This document logs how LLM (Large Language Model) tools were used throughout the
 | Phase 5 | Streamlit dashboard layout, Plotly chart configuration |
 | Phase 6 | OpenRouter integration, system prompt with DB schema injection |
 | Phase 7 | scikit-learn model selection, feature engineering, PCA visualization |
-| Phase 9 | README, technical documentation, this usage log |
+| Phase 8| README, technical documentation, this usage log |
 
 ### How It Was Used
 
 1. **Architecture discussion** — Explained requirements, got implementation plan
-2. **Code generation** — Generated modules with detailed docstrings and comments
-3. **Debugging** — Fixed SQLite threading issues, PowerShell escaping problems
-4. **Concept explanation** — Learned Pydantic, IsolationForest, KMeans, PCA concepts
-5. **Code review** — Validated approach before implementation
+2. **Debugging** — Fixed SQLite threading issues, PowerShell escaping problems
+3. **Concept explanation** — Learned Pydantic, IsolationForest
+4. **Code review** — Validated approach before implementation
 
 ### What Was NOT Delegated to LLM
 
+-**Code implementation** — I wrote code for ML anomaly detection, clustering, PCA, and dashboard logic myself, using LLM suggestions as guidance,also i have implemented the LLM integration code myself, following the OpenRouter API documentation and best practices for prompt engineering.
 - **Requirements analysis** — Manually read and understood the assessment PDF
 - **Data generation** — Used the provided `generate_fake_data.py` script as-is
 - **Testing** — Manually ran and verified each pipeline step
