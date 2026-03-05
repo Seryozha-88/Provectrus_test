@@ -11,7 +11,7 @@ PAGES:
     4. User Behavior — Heatmap, user rankings, session analysis
     5. Errors        — Error types, status codes, retry analysis
     6. AI Insights   — Natural language → SQL → answer (OpenRouter LLM)
-    7. ML Anomalies  — (placeholder — Phase 7)
+    7. ML Anomalies  — Anomaly detection, clustering, classification, forecasting
 
 ARCHITECTURE:
     dashboard.py  →  AnalyticsEngine  →  DatabaseManager  →  SQLite
@@ -39,6 +39,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.analytics import AnalyticsEngine
 from src.database import QueryFilters
 from src.ai_insights import AIInsights, AVAILABLE_MODELS, DEFAULT_MODEL, EXAMPLE_QUESTIONS
+from src.ml_anomaly import MLEngine
 
 # ---------------------------------------------------------------------------
 # PAGE CONFIG — must be the FIRST Streamlit command
@@ -902,21 +903,397 @@ def render_ai_page() -> None:
 
 
 # ===================================================================
-# PAGE 7: ML ANOMALIES (placeholder)
+# PAGE 7: ML & ANOMALY DETECTION
 # ===================================================================
 
+@st.cache_resource
+def get_ml_engine() -> MLEngine:
+    """Create and cache the ML engine (singleton, trains models once)."""
+    return MLEngine(str(PROJECT_ROOT / "data" / "analytics.db"))
+
+
 def render_ml_page() -> None:
-    """Placeholder for ML anomaly detection page — implemented in Phase 7."""
+    """ML & Anomaly Detection page with 4 model sections."""
     st.header("🔬 ML & Anomaly Detection")
-    st.info(
-        "**Coming in Phase 7!**\n\n"
-        "This page will use scikit-learn to:\n"
-        "- **Anomaly Detection** — Flag unusual sessions with IsolationForest\n"
-        "- **Clustering** — Group usage patterns with KMeans\n"
-        "- **Classification** — Predict team from usage with Decision Tree\n"
-        "- **Forecasting** — Predict future costs with Linear Regression\n\n"
-        "_All models will be trained on your real telemetry data._"
+    st.caption(
+        "Four scikit-learn models trained on session-level features "
+        "(~5,000 sessions × 12 features). All CPU-only, trains in < 3 seconds."
     )
+
+    ml = get_ml_engine()
+
+    # ---- Sidebar ML parameters ----
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔬 ML Parameters")
+    contamination = st.sidebar.slider(
+        "Anomaly contamination",
+        min_value=0.01, max_value=0.20, value=0.05, step=0.01,
+        help="Expected fraction of anomalous sessions (IsolationForest)",
+    )
+    n_clusters = st.sidebar.slider(
+        "Number of clusters",
+        min_value=2, max_value=8, value=4, step=1,
+        help="KMeans cluster count",
+    )
+    max_depth = st.sidebar.slider(
+        "Decision tree depth",
+        min_value=2, max_value=10, value=5, step=1,
+        help="Max depth for DecisionTree classifier",
+    )
+    days_ahead = st.sidebar.slider(
+        "Forecast horizon (days)",
+        min_value=7, max_value=90, value=30, step=7,
+        help="Number of days to forecast ahead",
+    )
+
+    # ---- Run all models (cached by Streamlit on param change) ----
+    with st.spinner("Training ML models..."):
+        anomalies = ml.detect_anomalies(contamination)
+        classification = ml.classify_practice(max_depth)
+        clusters = ml.cluster_sessions(n_clusters)
+        forecast = ml.forecast_cost(days_ahead)
+
+    # ---- Tabs for each model ----
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "🔴 Anomaly Detection",
+        "🌳 Practice Classification",
+        "🔵 Session Clustering",
+        "📈 Cost Forecast",
+    ])
+
+    # ==== TAB 1: Anomaly Detection ====
+    with tab1:
+        _render_anomaly_tab(anomalies)
+
+    # ==== TAB 2: Practice Classification ====
+    with tab2:
+        _render_classification_tab(classification)
+
+    # ==== TAB 3: Session Clustering ====
+    with tab3:
+        _render_cluster_tab(clusters)
+
+    # ==== TAB 4: Cost Forecast ====
+    with tab4:
+        _render_forecast_tab(forecast)
+
+
+# ---- Anomaly Tab ----
+def _render_anomaly_tab(anom) -> None:
+    """Render anomaly detection results."""
+    # KPI row
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Sessions", f"{anom.total_sessions:,}")
+    c2.metric("Anomalies Found", f"{anom.anomaly_count:,}")
+    c3.metric("Anomaly Rate", f"{anom.anomaly_count / anom.total_sessions:.1%}")
+    c4.metric("Contamination", f"{anom.contamination:.0%}")
+
+    st.markdown("---")
+
+    # PCA scatter with anomalies highlighted
+    st.subheader("Session Map (PCA 2D Projection)")
+    df = anom.features.copy()
+    # Quick PCA for visualization
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.decomposition import PCA
+    X = df[[
+        "api_call_count", "total_cost", "total_input_tokens",
+        "total_output_tokens", "total_cache_read_tokens", "prompt_count",
+        "tool_use_count", "tool_success_count", "duration_minutes",
+        "cost_per_api_call", "tokens_per_api_call", "tool_success_rate",
+    ]].values
+    X_scaled = StandardScaler().fit_transform(X)
+    pca_coords = PCA(n_components=2, random_state=42).fit_transform(X_scaled)
+    df["PC1"] = pca_coords[:, 0]
+    df["PC2"] = pca_coords[:, 1]
+    df["Status"] = df["is_anomaly"].map({True: "Anomaly", False: "Normal"})
+
+    fig = px.scatter(
+        df, x="PC1", y="PC2",
+        color="Status",
+        color_discrete_map={"Normal": "#636EFA", "Anomaly": "#EF553B"},
+        hover_data=["session_id", "practice", "total_cost", "api_call_count"],
+        title="Sessions in 2D (PCA) — Anomalies in Red",
+        opacity=0.6,
+    )
+    fig.update_layout(height=500)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Anomaly score distribution
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Anomaly Score Distribution")
+        fig_hist = px.histogram(
+            df, x="anomaly_score", color="Status",
+            color_discrete_map={"Normal": "#636EFA", "Anomaly": "#EF553B"},
+            nbins=50,
+            title="Distribution of Anomaly Scores (lower = more anomalous)",
+            barmode="overlay",
+            opacity=0.7,
+        )
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+    with col2:
+        st.subheader("Anomalies by Practice")
+        anom_by_practice = (
+            df[df["is_anomaly"]]
+            .groupby("practice")
+            .size()
+            .reset_index(name="count")
+            .sort_values("count", ascending=False)
+        )
+        if not anom_by_practice.empty:
+            fig_bar = px.bar(
+                anom_by_practice, x="practice", y="count",
+                color="practice",
+                title="Anomalous Sessions per Team",
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+        else:
+            st.info("No anomalies detected.")
+
+    # Top anomalies table
+    st.subheader("Top 20 Most Anomalous Sessions")
+    display_cols = [
+        "session_id", "practice", "level", "total_cost",
+        "api_call_count", "tool_use_count", "duration_minutes",
+        "anomaly_score",
+    ]
+    available_cols = [c for c in display_cols if c in anom.top_anomalies.columns]
+    if not anom.top_anomalies.empty:
+        st.dataframe(
+            anom.top_anomalies[available_cols].reset_index(drop=True),
+            use_container_width=True,
+            height=400,
+        )
+    else:
+        st.info("No anomalies to display.")
+
+
+# ---- Classification Tab ----
+def _render_classification_tab(clf) -> None:
+    """Render practice classification results."""
+    # KPI row
+    c1, c2, c3 = st.columns(3)
+    c1.metric("CV Accuracy (5-fold)", f"{clf.accuracy:.1%}")
+    c2.metric("Classes", f"{len(clf.classes)}")
+    c3.metric(
+        "Best / Worst Fold",
+        f"{clf.cv_scores.max():.1%} / {clf.cv_scores.min():.1%}",
+    )
+
+    st.markdown("---")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Feature Importance")
+        fig_imp = px.bar(
+            clf.feature_importances,
+            x="importance", y="feature",
+            orientation="h",
+            title="Which features distinguish teams?",
+            color="importance",
+            color_continuous_scale="Viridis",
+        )
+        fig_imp.update_layout(height=450, yaxis={"autorange": "reversed"})
+        st.plotly_chart(fig_imp, use_container_width=True)
+
+    with col2:
+        st.subheader("Cross-Validation Scores")
+        cv_df = pd.DataFrame({
+            "Fold": [f"Fold {i+1}" for i in range(len(clf.cv_scores))],
+            "Accuracy": clf.cv_scores,
+        })
+        fig_cv = px.bar(
+            cv_df, x="Fold", y="Accuracy",
+            title="Accuracy per CV Fold",
+            text=cv_df["Accuracy"].apply(lambda x: f"{x:.1%}"),
+            color="Accuracy",
+            color_continuous_scale="RdYlGn",
+        )
+        fig_cv.update_layout(height=450)
+        st.plotly_chart(fig_cv, use_container_width=True)
+
+    # Classification report
+    st.subheader("Classification Report")
+    st.code(clf.class_report, language="text")
+
+    # Decision tree rules (collapsible)
+    with st.expander("🌳 Decision Tree Rules (click to expand)"):
+        st.code(clf.tree_rules, language="text")
+
+
+# ---- Clustering Tab ----
+def _render_cluster_tab(clust) -> None:
+    """Render session clustering results."""
+    # KPI row
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Clusters", f"{clust.n_clusters}")
+    c2.metric("Sessions", f"{sum(clust.cluster_sizes.values()):,}")
+    c3.metric("Inertia", f"{clust.inertia:,.0f}")
+
+    st.markdown("---")
+
+    # PCA scatter colored by cluster
+    st.subheader("Session Clusters (PCA 2D)")
+    pca_df = clust.pca_2d.copy()
+    pca_df["cluster"] = pca_df["cluster"].astype(str)
+    fig_scatter = px.scatter(
+        pca_df, x="PC1", y="PC2",
+        color="cluster",
+        hover_data=["session_id", "practice", "total_cost"],
+        title="Sessions Projected to 2D — Colored by Cluster",
+        opacity=0.6,
+    )
+    fig_scatter.update_layout(height=500)
+    st.plotly_chart(fig_scatter, use_container_width=True)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Cluster Sizes")
+        sizes_df = pd.DataFrame([
+            {"Cluster": f"Cluster {k}", "Sessions": v}
+            for k, v in sorted(clust.cluster_sizes.items())
+        ])
+        fig_sizes = px.pie(
+            sizes_df, values="Sessions", names="Cluster",
+            title="Sessions per Cluster",
+        )
+        st.plotly_chart(fig_sizes, use_container_width=True)
+
+    with col2:
+        st.subheader("Cluster × Practice")
+        # Cross-tabulation of cluster vs practice
+        cross = pd.crosstab(
+            pca_df["cluster"], pca_df["practice"],
+        ).reset_index()
+        cross_melted = cross.melt(
+            id_vars="cluster", var_name="practice", value_name="count"
+        )
+        fig_cross = px.bar(
+            cross_melted, x="cluster", y="count", color="practice",
+            title="Practice Distribution per Cluster",
+            barmode="group",
+        )
+        st.plotly_chart(fig_cross, use_container_width=True)
+
+    # Cluster profiles heatmap
+    st.subheader("Cluster Profiles (Mean Feature Values)")
+    profiles = clust.cluster_profiles.set_index("cluster")
+    # Normalize for heatmap (0-1 scale per feature)
+    profiles_norm = (profiles - profiles.min()) / (profiles.max() - profiles.min() + 1e-9)
+    fig_heat = px.imshow(
+        profiles_norm.T,
+        labels=dict(x="Cluster", y="Feature", color="Normalized Value"),
+        x=[f"Cluster {i}" for i in profiles.index],
+        y=profiles.columns.tolist(),
+        color_continuous_scale="YlOrRd",
+        title="Cluster Profiles (normalized 0–1)",
+        aspect="auto",
+    )
+    fig_heat.update_layout(height=500)
+    st.plotly_chart(fig_heat, use_container_width=True)
+
+    # Raw profiles table
+    with st.expander("📊 Raw Cluster Profiles (click to expand)"):
+        st.dataframe(clust.cluster_profiles, use_container_width=True)
+
+
+# ---- Forecast Tab ----
+def _render_forecast_tab(fc) -> None:
+    """Render cost forecast results."""
+    # KPI row
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("R² Score", f"{fc.r2_score:.4f}")
+    c2.metric("Trend", f"{fc.slope_per_day:+.4f} $/day")
+    c3.metric("Avg Daily Cost", f"${fc.avg_daily_cost:.2f}")
+    if not fc.forecast.empty:
+        c4.metric(
+            f"{len(fc.forecast)}-Day Forecast Total",
+            f"${fc.forecast['predicted_cost'].sum():,.2f}",
+        )
+    else:
+        c4.metric("Forecast", "N/A")
+
+    st.markdown("---")
+
+    if fc.historical.empty:
+        st.warning("No historical data available for forecasting.")
+        return
+
+    # Combined chart: actual + fitted + forecast
+    st.subheader("Daily Cost: Actual vs Forecast")
+
+    fig = go.Figure()
+
+    # Actual daily costs
+    fig.add_trace(go.Scatter(
+        x=fc.historical["date"],
+        y=fc.historical["daily_cost"],
+        mode="lines",
+        name="Actual Cost",
+        line=dict(color="#636EFA", width=1.5),
+        opacity=0.7,
+    ))
+
+    # Fitted trend line
+    fig.add_trace(go.Scatter(
+        x=fc.historical["date"],
+        y=fc.historical["fitted_cost"],
+        mode="lines",
+        name="Trend (fitted)",
+        line=dict(color="#00CC96", width=2, dash="dash"),
+    ))
+
+    # Forecast line
+    if not fc.forecast.empty:
+        fig.add_trace(go.Scatter(
+            x=fc.forecast["date"],
+            y=fc.forecast["predicted_cost"],
+            mode="lines",
+            name="Forecast",
+            line=dict(color="#EF553B", width=2, dash="dot"),
+        ))
+
+        # Shade forecast region
+        fig.add_vrect(
+            x0=fc.forecast["date"].iloc[0],
+            x1=fc.forecast["date"].iloc[-1],
+            fillcolor="rgba(239, 85, 59, 0.08)",
+            line_width=0,
+            annotation_text="Forecast",
+            annotation_position="top left",
+        )
+
+    fig.update_layout(
+        title="Historical Daily Cost + Linear Forecast",
+        xaxis_title="Date",
+        yaxis_title="Daily Cost ($)",
+        height=500,
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Interpretation
+    direction = "increasing" if fc.slope_per_day > 0 else "decreasing"
+    st.info(
+        f"**Trend interpretation:** Daily cost is **{direction}** at "
+        f"**${abs(fc.slope_per_day):.4f}/day** "
+        f"(R² = {fc.r2_score:.4f}). "
+        f"{'A low R² means costs are volatile — the linear trend captures only a small portion of variance.' if fc.r2_score < 0.3 else 'The trend is a reasonable fit to the data.'}"
+    )
+
+    # Forecast table (collapsible)
+    with st.expander("📋 Forecast Table (click to expand)"):
+        st.dataframe(
+            fc.forecast.assign(
+                predicted_cost=fc.forecast["predicted_cost"].round(2)
+            )[['date', 'predicted_cost']],
+            use_container_width=True,
+            height=300,
+        )
 
 
 # ===================================================================
