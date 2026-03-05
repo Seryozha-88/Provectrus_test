@@ -10,7 +10,7 @@ PAGES:
     3. Tool Usage    — Tool frequency, success rates, reliability
     4. User Behavior — Heatmap, user rankings, session analysis
     5. Errors        — Error types, status codes, retry analysis
-    6. AI Insights   — (placeholder — Phase 6)
+    6. AI Insights   — Natural language → SQL → answer (OpenRouter LLM)
     7. ML Anomalies  — (placeholder — Phase 7)
 
 ARCHITECTURE:
@@ -38,6 +38,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.analytics import AnalyticsEngine
 from src.database import QueryFilters
+from src.ai_insights import AIInsights, AVAILABLE_MODELS, DEFAULT_MODEL, EXAMPLE_QUESTIONS
 
 # ---------------------------------------------------------------------------
 # PAGE CONFIG — must be the FIRST Streamlit command
@@ -767,29 +768,137 @@ def render_errors_page(engine: AnalyticsEngine, filters: QueryFilters) -> None:
 
 
 # ===================================================================
-# PAGE 6: AI INSIGHTS (placeholder)
+# PAGE 6: AI INSIGHTS
 # ===================================================================
 
 def render_ai_page() -> None:
-    """Placeholder for AI insights page — implemented in Phase 6."""
+    """AI-powered natural language query interface.
+
+    Users type a question in English → LLM generates SQL →
+    executes against database → LLM interprets results →
+    shows answer + table + SQL used.
+    """
     st.header("🤖 AI Insights")
-    st.info(
-        "**Coming in Phase 6!**\n\n"
-        "This page will allow you to ask questions about the data "
-        "in natural language. The LLM will:\n"
-        "1. Understand your question\n"
-        "2. Generate a SQL query\n"
-        "3. Execute it against the database\n"
-        "4. Return a human-readable answer + chart\n\n"
-        "_Example: \"Which team spent the most on Claude Opus last week?\"_"
+    st.caption(
+        "Ask questions about the telemetry data in plain English. "
+        "The AI will generate SQL, run it, and explain the results."
     )
 
-    # Disabled input for visual preview
-    st.text_input(
-        "Ask a question about the data...",
-        placeholder="e.g., Which model has the highest cost per request?",
-        disabled=True,
+    # ---- Sidebar: API Key + Model selection ----
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔑 AI Settings")
+
+    api_key = st.sidebar.text_input(
+        "OpenRouter API Key",
+        type="password",
+        placeholder="sk-or-v1-...",
+        help="Get your key at https://openrouter.ai/keys",
     )
+
+    selected_model = st.sidebar.selectbox(
+        "LLM Model",
+        AVAILABLE_MODELS,
+        index=AVAILABLE_MODELS.index(DEFAULT_MODEL),
+        help="Model used for SQL generation and interpretation",
+    )
+
+    if not api_key:
+        st.warning(
+            "⚠️ Please enter your **OpenRouter API key** in the sidebar to use AI Insights.\n\n"
+            "Get one free at [openrouter.ai/keys](https://openrouter.ai/keys)"
+        )
+        # Show example questions even without API key
+        st.markdown("### 💡 Example Questions")
+        for i, q in enumerate(EXAMPLE_QUESTIONS):
+            st.markdown(f"{i+1}. {q}")
+        return
+
+    # ---- Initialize AI engine ----
+    db_path = str(PROJECT_ROOT / "data" / "analytics.db")
+    ai = AIInsights(api_key=api_key, db_path=db_path, model=selected_model)
+
+    # ---- Chat interface ----
+    # Initialize chat history in session state
+    if "ai_messages" not in st.session_state:
+        st.session_state.ai_messages = []
+
+    # Display chat history
+    for msg in st.session_state.ai_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if "sql" in msg:
+                with st.expander("📝 SQL Query Used"):
+                    st.code(msg["sql"], language="sql")
+            if "data" in msg and msg["data"] is not None and len(msg["data"]) > 0:
+                with st.expander(f"📊 Results Table ({len(msg['data'])} rows)"):
+                    st.dataframe(msg["data"], use_container_width=True, hide_index=True)
+
+    # ---- Quick question buttons ----
+    if not st.session_state.ai_messages:
+        st.markdown("### 💡 Try a question:")
+        cols = st.columns(2)
+        for i, q in enumerate(EXAMPLE_QUESTIONS[:6]):
+            col = cols[i % 2]
+            if col.button(q, key=f"example_{i}", use_container_width=True):
+                st.session_state.ai_pending_question = q
+                st.rerun()
+
+    # ---- Handle pending question from button click ----
+    pending = st.session_state.pop("ai_pending_question", None)
+
+    # ---- Chat input ----
+    user_input = st.chat_input("Ask a question about the telemetry data...")
+    question = pending or user_input
+
+    if question:
+        # Display user message
+        st.session_state.ai_messages.append({"role": "user", "content": question})
+        with st.chat_message("user"):
+            st.markdown(question)
+
+        # Generate answer
+        with st.chat_message("assistant"):
+            with st.spinner(f"Thinking... (using {selected_model.split('/')[-1]})"):
+                result = ai.ask(question)
+
+            if result["error"]:
+                st.error(f"❌ {result['error']}")
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": f"❌ {result['error']}",
+                }
+            else:
+                # Show answer
+                st.markdown(result["answer"])
+
+                # Show SQL in expander
+                if result["sql"]:
+                    with st.expander("📝 SQL Query Used"):
+                        st.code(result["sql"], language="sql")
+
+                # Show results table in expander
+                if not result["data"].empty:
+                    with st.expander(f"📊 Results Table ({len(result['data'])} rows)"):
+                        st.dataframe(
+                            result["data"],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": result["answer"],
+                    "sql": result["sql"],
+                    "data": result["data"],
+                }
+
+            st.session_state.ai_messages.append(assistant_msg)
+
+    # ---- Clear chat button ----
+    if st.session_state.ai_messages:
+        if st.button("🗑️ Clear Chat History"):
+            st.session_state.ai_messages = []
+            st.rerun()
 
 
 # ===================================================================
